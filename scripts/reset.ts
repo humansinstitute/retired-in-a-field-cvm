@@ -1,0 +1,56 @@
+/**
+ * Reset script: clears leaderboard tables to start fresh for launch.
+ * Usage: bun run scripts/reset.ts
+ */
+
+import { Database } from 'bun:sqlite';
+
+const DB_PATH = './retired.db';
+
+function reset() {
+  console.log(`[reset] Connecting to database at ${DB_PATH}`);
+  const db = new Database(DB_PATH);
+
+  try {
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA foreign_keys = ON;");
+
+    // Ensure tables exist before deletion
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS leaderboard_entries (
+        npub TEXT PRIMARY KEY,
+        initials TEXT NOT NULL,
+        total_sats_lost INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS leaderboard_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref_id TEXT UNIQUE NOT NULL,
+        npub TEXT NOT NULL,
+        initials TEXT NOT NULL,
+        sats_lost INTEGER NOT NULL,
+        submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log('[reset] Clearing tables: leaderboard_updates, leaderboard_entries');
+    db.exec('DELETE FROM leaderboard_updates;');
+    db.exec('DELETE FROM leaderboard_entries;');
+
+    // Optional: reclaim space
+    db.exec('VACUUM;');
+
+    console.log('[reset] Reset complete. All leaderboard data cleared.');
+  } catch (err) {
+    console.error('[reset] Error during reset:', err);
+    process.exitCode = 1;
+  } finally {
+    db.close();
+  }
+}
+
+reset();
+

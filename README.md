@@ -18,6 +18,14 @@ To run the reference server:
 bun run server.ts
 ```
 
+To reset the database and leaderboard (wipe all data):
+
+```bash
+bun run scripts/reset.ts
+# or
+bun run reset
+```
+
 ## Cashuwall Integration
 
 This server integrates with a local Cashuwall API to validate and redeem Cashu tokens before granting access to play the game.
