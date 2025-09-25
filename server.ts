@@ -54,10 +54,10 @@ async function main() {
     "cashu_access",
     {
       title: "Cashu Access Tool",
-      description: "Redeem a Cashu token and check access permissions",
+      description: "Redeem a Cashu token via Cashuwall and check access permissions",
       inputSchema: {
         encodedToken: z.string().describe("Cashu token (cashuA...)"),
-        minAmount: z.number().optional().describe("Minimum sats required (default 256)")
+        minAmount: z.number().optional().describe("Client hint for min sats (default 21). Server enforces threshold.")
       },
     },
     
