@@ -31,7 +31,7 @@ async function main() {
 
   // 3. Create and connect the MCP Client
   const mcpClient = new Client({
-    name: "nostr-echo-client",
+    name: "retired-fe-client",
     version: "1.0.0",
   });
   await mcpClient.connect(clientTransport);
@@ -43,13 +43,13 @@ async function main() {
   const tools = await mcpClient.listTools();
   console.log("Tools:", tools);
 
-  // 5. Call the "echo" tool
-  console.log('\nCalling the "echo" tool...');
-  const echoResult = await mcpClient.callTool({
-    name: "echo",
-    arguments: { message: "Hello, Nostr!" },
+  // 5. Call the "check_leaderboard" tool
+  console.log('\nCalling the "check_leaderboard" tool...');
+  const leaderboardResult = await mcpClient.callTool({
+    name: "check_leaderboard",
+    arguments: {},
   });
-  console.log("Echo result:", echoResult);
+  console.log("Leaderboard result:", leaderboardResult);
 
   // 6. Close the connection
   await mcpClient.close();

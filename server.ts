@@ -3,6 +3,8 @@ import { ApplesauceRelayPool, NostrServerTransport } from "@contextvm/sdk";
 import { PrivateKeySigner } from "@contextvm/sdk";
 import { z } from "zod";
 import { processCashuToken } from "./utils/cashu-access.js";
+import { checkLeaderboard, updateLeaderboard, getPlayer } from "./utils/leaderboard.js";
+import { initializeDatabase } from "./utils/database.js";
 
 
 // --- Configuration ---
@@ -15,7 +17,11 @@ const RELAYS = process.env.RELAYS?.split(",") || [
 
 // --- Main Server Logic ---
 async function main() {
-  // 1. Setup Signer and Relay Pool
+  // 1. Initialize Database
+  console.log("Initializing database...");
+  initializeDatabase();
+
+  // 2. Setup Signer and Relay Pool
   const signer = new PrivateKeySigner(SERVER_PRIVATE_KEY_HEX);
   const relayPool = new ApplesauceRelayPool(RELAYS);
   const serverPubkey = await signer.getPublicKey();
@@ -23,13 +29,13 @@ async function main() {
   console.log(`Server Public Key: ${serverPubkey}`);
   console.log("Connecting to relays...");
 
-  // 2. Create and Configure the MCP Server
+  // 3. Create and Configure the MCP Server
   const mcpServer = new McpServer({
     name: "Retired CV",
     version: "1.0.1",
   });
 
-  // 3. Define a simple "echo" tool
+  // 4. Define a simple "echo" tool
   mcpServer.registerTool(
     "Echo",
     {
@@ -85,9 +91,137 @@ async function main() {
     }
   );
 
+  mcpServer.registerTool(
+    "check_leaderboard",
+    {
+      title: "Check Leaderboard",
+      description: "Get the current leaderboard showing initials, npub, and sats lost",
+      inputSchema: {},
+    },
+    
+    async () => {
+      try {
+        console.log(`🏆 Processing leaderboard request`);
+        
+        const result = await checkLeaderboard();
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }],
+        };
+      } catch (error) {
+        console.error("❌ Leaderboard error:", error);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Failed to fetch leaderboard: ${error instanceof Error ? error.message : 'unknown'}`,
+              data: []
+            }, null, 2)
+          }],
+        };
+      }
+    }
+  );
 
+  mcpServer.registerTool(
+    "update_leaderboard",
+    {
+      title: "Update Leaderboard",
+      description: "Update the leaderboard with new sats lost for a given npub and initials with deduplication",
+      inputSchema: {
+        initials: z.string().describe("3-letter initials for the participant"),
+        npub: z.string().describe("The npub identifier"),
+        satsLost: z.number().describe("Number of sats lost in this submission"),
+        refId: z.string().describe("Unique reference ID to prevent duplicate processing")
+      },
+    },
+    
+    async ({ initials, npub, satsLost, refId }) => {
+      try {
+        console.log(`📝 Processing leaderboard update request (refId: ${refId})`);
+        
+        const result = await updateLeaderboard(npub, initials, satsLost, refId);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }],
+        };
+      } catch (error) {
+        console.error("❌ Leaderboard update error:", error);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Failed to update leaderboard: ${error instanceof Error ? error.message : 'unknown'}`,
+              initials: initials || 'unknown',
+              npub: npub || 'unknown',
+              satsLost: satsLost || 0,
+              refId: refId || 'unknown'
+            }, null, 2)
+          }],
+        };
+      }
+    }
+  );
 
-  // 4. Configure the Nostr Server Transport
+  mcpServer.registerTool(
+    "get_player",
+    {
+      title: "Get Player Details",
+      description: "Get player details by npub including initials, total sats lost (score), and number of games played",
+      inputSchema: {
+        npub: z.string().describe("The npub identifier of the player")
+      },
+    },
+    
+    async ({ npub }) => {
+      try {
+        console.log(`👤 Processing get player request for npub: ${npub.substring(0, 20)}...`);
+        
+        const result = await getPlayer(npub);
+        
+        if (!result) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Player not found",
+                npub: npub
+              }, null, 2)
+            }],
+          };
+        }
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }],
+        };
+      } catch (error) {
+        console.error("❌ Get player error:", error);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Failed to get player details: ${error instanceof Error ? error.message : 'unknown'}`,
+              npub: npub || 'unknown'
+            }, null, 2)
+          }],
+        };
+      }
+    }
+  );
+
+  // 5. Configure the Nostr Server Transport
   const serverTransport = new NostrServerTransport({
     signer,
     relayHandler: relayPool,
@@ -96,7 +230,7 @@ async function main() {
     },
   });
 
-  // 5. Connect the server
+  // 6. Connect the server
   await mcpServer.connect(serverTransport);
 
   console.log("Server is running and listening for requests on Nostr...");
