@@ -15,6 +15,7 @@ import {
 } from "./utils/leaderboard.js";
 import { initializeDatabase, getDatabase } from "./utils/database.js";
 import { createHash } from "crypto";
+import { startPayoutWorker } from "./utils/payout-worker.js";
 
 
 // --- Configuration ---
@@ -343,6 +344,9 @@ async function main() {
 
   console.log("Server is running and listening for requests on Nostr...");
   console.log("Press Ctrl+C to exit.");
+
+  // 7. Start background payout worker (reads splits.json and zaps owed balances)
+  startPayoutWorker(30_000);
 }
 
 main().catch((error) => {

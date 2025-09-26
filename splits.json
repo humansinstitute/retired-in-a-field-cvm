@@ -1,0 +1,12 @@
+{
+  "zapEndpoint": "http://localhost:4055/zap",
+  "entries": [
+    {
+      "npub": "npub1dvmcpmefwtnn6dctsj3728n64xhrf06p9yude77echmrkgs5zmyqw33jdm",
+      "lightningAddress": "dvmcp@coinos.io",
+      "min_amount": 21,
+      "comment": "Cheers! why not reitre to a field!"
+    }
+  ]
+}
+
