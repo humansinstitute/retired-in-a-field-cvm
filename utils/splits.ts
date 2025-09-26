@@ -315,3 +315,103 @@ export async function redeemCashuAndRecordSplit(encodedToken: string, minAmount:
     payouts: finalized,
   };
 }
+
+/**
+ * Record-only path: assumes token has already been redeemed and we know the amount.
+ * This function will not contact Cashuwall. It will idempotently record the donation
+ * (deduped by token hash) and update split accumulators and payouts.
+ */
+export async function recordDonationAndSplitFromAmount(
+  encodedToken: string,
+  amountSats: number
+): Promise<{
+  donationRecorded: boolean;
+  donationSource: string;
+  splits: { npub: string; added: number; newOwed: number }[];
+  payouts: { npub: string; amount: number; status: PayoutStatus; externalRef?: string }[];
+  preventedDuplicate: boolean;
+}> {
+  if (!encodedToken || typeof encodedToken !== "string") {
+    throw new Error("encodedToken is required");
+  }
+  if (!amountSats || amountSats <= 0) {
+    throw new Error("amountSats must be > 0");
+  }
+
+  const { npub1, npub2, threshold } = getConfig();
+  const source = sha256(encodedToken);
+
+  const db = getDatabase();
+  let splits: { npub: string; added: number; newOwed: number }[] = [];
+  let pendingPayouts: { npub: string; amount: number; status: PayoutStatus; externalRef?: string }[] = [];
+  let preventedDuplicate = false;
+
+  executeTransaction((txDb) => {
+    // Prevent duplicates if this token was already recorded
+    const existingDonation = txDb.query("SELECT source FROM donations WHERE source = ?").get(source);
+    if (existingDonation) {
+      preventedDuplicate = true;
+      return true;
+    }
+
+    const { isNew, splits: newSplits } = recordDonationAndSplit(txDb, source, amountSats, npub1, npub2);
+    splits = newSplits;
+    if (isNew) {
+      const tp1 = triggerPayoutsIfThreshold(txDb, npub1, threshold);
+      const tp2 = triggerPayoutsIfThreshold(txDb, npub2, threshold);
+      pendingPayouts = [...tp1.payouts, ...tp2.payouts];
+    }
+    return true;
+  });
+
+  if (preventedDuplicate) {
+    return {
+      donationRecorded: false,
+      donationSource: source,
+      splits: [],
+      payouts: [],
+      preventedDuplicate: true,
+    };
+  }
+
+  // Finalize any pending payouts (stubbed)
+  const finalized: { npub: string; amount: number; status: PayoutStatus; externalRef?: string }[] = [];
+  for (const p of pendingPayouts) {
+    const attempt = await requestInvoiceAndPayStub(p.npub, p.amount);
+    if (attempt.ok) {
+      const row = db
+        .query(
+          `SELECT id FROM payouts WHERE npub=$npub AND amount_sats=$amt AND status='pending' ORDER BY id DESC LIMIT 1`
+        )
+        .get({ $npub: p.npub, $amt: p.amount }) as { id?: number } | null;
+      if (row?.id) {
+        executeTransaction((txDb) => {
+          finalizePayoutSuccess(txDb, row.id!, p.npub, p.amount, attempt.externalRef);
+          return true;
+        });
+      }
+      finalized.push({ ...p, status: "sent", externalRef: attempt.externalRef });
+    } else {
+      const row = db
+        .query(
+          `SELECT id FROM payouts WHERE npub=$npub AND amount_sats=$amt AND status='pending' ORDER BY id DESC LIMIT 1`
+        )
+        .get({ $npub: p.npub, $amt: p.amount }) as { id?: number } | null;
+      if (row?.id) {
+        executeTransaction((txDb) => {
+          finalizePayoutFailure(txDb, row.id!, attempt.error || "stub_failure");
+          return true;
+        });
+      }
+      finalized.push({ ...p, status: "failed" });
+    }
+  }
+
+  return {
+    donationRecorded: splits.length > 0,
+    donationSource: source,
+    splits,
+    payouts: finalized,
+    preventedDuplicate: false,
+  };
+}

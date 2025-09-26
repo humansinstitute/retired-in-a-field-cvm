@@ -3,6 +3,7 @@ import { ApplesauceRelayPool, NostrServerTransport } from "@contextvm/sdk";
 import { PrivateKeySigner } from "@contextvm/sdk";
 import { z } from "zod";
 import { processCashuToken } from "./utils/cashu-access.js";
+import { recordDonationAndSplitFromAmount } from "./utils/splits.js";
 import {
   checkLeaderboard,
   updateLeaderboard,
@@ -12,7 +13,8 @@ import {
   performIntegrityCheck,
   validateAndSyncPlayerScore
 } from "./utils/leaderboard.js";
-import { initializeDatabase } from "./utils/database.js";
+import { initializeDatabase, getDatabase } from "./utils/database.js";
+import { createHash } from "crypto";
 
 
 // --- Configuration ---
@@ -70,8 +72,36 @@ async function main() {
       },
       async ({ encodedToken, minAmount }) => {
         try {
-          console.log(`🪙 Processing Cashu token access request (pure redeem, no DB)`);
+          console.log(`🪙 Processing Cashu token access request (redeem + record async)`);
           const result = await processCashuToken(encodedToken, minAmount);
+
+          // Persist access decision (idempotent) using token hash as ref_id
+          try {
+            const db = getDatabase();
+            const tokenHash = createHash('sha256').update(encodedToken).digest('hex');
+            const stmt = db.prepare(
+              `INSERT INTO cashu_access_requests (ref_id, decision, amount_sats, reason, created_at, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+               ON CONFLICT(ref_id) DO UPDATE SET decision=excluded.decision, amount_sats=excluded.amount_sats, reason=excluded.reason, updated_at=CURRENT_TIMESTAMP`
+            );
+            stmt.run(tokenHash, result.decision, result.amount || 0, result.reason || '');
+          } catch (err) {
+            console.warn("[cashu_access] Failed to persist access request:", err);
+          }
+
+          // Fire-and-forget: if access granted, record donation/splits without blocking response
+          if (result.decision === 'ACCESS_GRANTED' && result.amount > 0) {
+            (async () => {
+              try {
+                const rec = await recordDonationAndSplitFromAmount(encodedToken, result.amount);
+                console.log(`[cashu_access->finalize] donationRecorded=${rec.donationRecorded} preventedDuplicate=${rec.preventedDuplicate}`);
+              } catch (e) {
+                console.error("[cashu_access->finalize] Error recording donation/splits:", e);
+              }
+            })();
+          }
+
+          // Return decision immediately
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         } catch (error) {
           console.error("❌ Cashu access error:", error);

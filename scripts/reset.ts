@@ -15,7 +15,7 @@ function reset() {
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA foreign_keys = ON;");
 
-    // Ensure tables exist before deletion
+    // Ensure tables exist before deletion (leaderboard + splits/donations/payouts)
     db.exec(`
       CREATE TABLE IF NOT EXISTS leaderboard_entries (
         npub TEXT PRIMARY KEY,
@@ -36,9 +36,55 @@ function reset() {
       );
     `);
 
+    // Splits/donations/payouts tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS donations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT UNIQUE NOT NULL,
+        amount_sats INTEGER NOT NULL,
+        redeemed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS split_accumulators (
+        npub TEXT PRIMARY KEY,
+        owed_sats INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        npub TEXT NOT NULL,
+        amount_sats INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        finalized_at DATETIME,
+        external_ref TEXT,
+        error TEXT
+      );
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS cashu_access_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref_id TEXT UNIQUE NOT NULL,
+        decision TEXT,
+        amount_sats INTEGER,
+        reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME
+      );
+    `);
+
     console.log('[reset] Clearing tables: leaderboard_updates, leaderboard_entries');
     db.exec('DELETE FROM leaderboard_updates;');
     db.exec('DELETE FROM leaderboard_entries;');
+
+    console.log('[reset] Clearing tables: donations, split_accumulators, payouts, cashu_access_requests');
+    db.exec('DELETE FROM donations;');
+    db.exec('DELETE FROM split_accumulators;');
+    db.exec('DELETE FROM payouts;');
+    db.exec('DELETE FROM cashu_access_requests;');
 
     // Optional: reclaim space
     db.exec('VACUUM;');
@@ -53,4 +99,3 @@ function reset() {
 }
 
 reset();
-
