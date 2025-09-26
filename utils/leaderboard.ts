@@ -267,3 +267,293 @@ export async function getPlayer(npub: string): Promise<PlayerDetails | null> {
     throw new Error(`Failed to fetch player details: ${error instanceof Error ? error.message : 'unknown error'}`);
   }
 }
+
+/**
+ * Validate and synchronize a player's score from their update history
+ * This ensures consistency between leaderboard_entries and leaderboard_updates
+ */
+export async function validateAndSyncPlayerScore(npub: string): Promise<{
+  wasInconsistent: boolean;
+  oldTotal: number;
+  newTotal: number;
+  difference: number;
+}> {
+  console.log(`[validate_sync_player] Validating and syncing score for npub: ${npub.substring(0, 20)}...`);
+  
+  if (!npub) {
+    throw new Error("npub is required");
+  }
+  
+  try {
+    const result = executeTransaction((db) => {
+      // Get current leaderboard entry
+      const getCurrentTotal = db.prepare(`
+        SELECT total_sats_lost FROM leaderboard_entries WHERE npub = ?
+      `);
+      const currentEntry = getCurrentTotal.get(npub) as { total_sats_lost: number } | undefined;
+      
+      if (!currentEntry) {
+        console.log(`[validate_sync_player] No leaderboard entry found for npub: ${npub.substring(0, 20)}...`);
+        return { wasInconsistent: false, oldTotal: 0, newTotal: 0, difference: 0 };
+      }
+      
+      // Calculate actual total from updates
+      const calculateTotal = db.prepare(`
+        SELECT COALESCE(SUM(sats_lost), 0) as calculated_total
+        FROM leaderboard_updates
+        WHERE npub = ?
+      `);
+      const calculatedResult = calculateTotal.get(npub) as { calculated_total: number };
+      
+      const oldTotal = currentEntry.total_sats_lost;
+      const newTotal = calculatedResult.calculated_total;
+      const difference = newTotal - oldTotal;
+      
+      if (difference === 0) {
+        console.log(`[validate_sync_player] Score is already consistent: ${oldTotal} sats`);
+        return { wasInconsistent: false, oldTotal, newTotal, difference: 0 };
+      }
+      
+      // Update the leaderboard entry with correct total
+      const updateEntry = db.prepare(`
+        UPDATE leaderboard_entries
+        SET total_sats_lost = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE npub = ?
+      `);
+      updateEntry.run(newTotal, npub);
+      
+      console.log(`[validate_sync_player] Synced score: ${oldTotal} → ${newTotal} (diff: ${difference})`);
+      return { wasInconsistent: true, oldTotal, newTotal, difference };
+    });
+    
+    return result;
+    
+  } catch (error) {
+    console.error(`[validate_sync_player] Error:`, error);
+    throw new Error(`Failed to validate and sync player score: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/**
+ * Enhanced update leaderboard with built-in validation
+ * This version ensures consistency and prevents race conditions
+ */
+export async function updateLeaderboardWithValidation(
+  npub: string,
+  initials: string,
+  sats: number,
+  refId: string
+): Promise<LeaderboardUpdateResult & { validationResult?: any }> {
+  console.log(`[update_leaderboard_validated] Updating leaderboard for npub: ${npub.substring(0, 20)}... with ${sats} sats (refId: ${refId})`);
+  
+  if (!npub || !initials || sats <= 0 || !refId) {
+    throw new Error("Invalid input: npub, initials, positive sats, and refId are required");
+  }
+  
+  if (initials.length !== 3) {
+    throw new Error("Initials must be exactly 3 characters");
+  }
+  
+  try {
+    // First, validate current state before updating
+    const preValidation = await validateAndSyncPlayerScore(npub).catch(() => null);
+    
+    // Perform the standard update
+    const updateResult = await updateLeaderboard(npub, initials, sats, refId);
+    
+    // Validate again after update to ensure consistency
+    const postValidation = await validateAndSyncPlayerScore(npub);
+    
+    return {
+      ...updateResult,
+      validationResult: {
+        preValidation,
+        postValidation,
+        isConsistent: !postValidation.wasInconsistent
+      }
+    };
+    
+  } catch (error) {
+    console.error(`[update_leaderboard_validated] Error:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Get player score with validation
+ * This ensures the returned score is consistent with update history
+ */
+export async function getPlayerWithValidation(npub: string): Promise<PlayerDetails | null> {
+  console.log(`[get_player_validated] Fetching validated player details for npub: ${npub.substring(0, 20)}...`);
+  
+  try {
+    // Validate and sync score first
+    await validateAndSyncPlayerScore(npub);
+    
+    // Then get the player details
+    return await getPlayer(npub);
+    
+  } catch (error) {
+    console.error(`[get_player_validated] Error:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Check if a cashu token amount matches expected game score
+ * This helps prevent random end screen submissions
+ */
+export async function validateCashuTokenAmount(
+  npub: string,
+  tokenAmount: number,
+  expectedGameScore?: number
+): Promise<{
+  isValid: boolean;
+  reason: string;
+  playerHistory?: PlayerDetails;
+  recommendations: string[];
+}> {
+  console.log(`[validate_cashu_amount] Validating token amount ${tokenAmount} for npub: ${npub.substring(0, 20)}...`);
+  
+  try {
+    const playerHistory = await getPlayer(npub);
+    const recommendations: string[] = [];
+    
+    // Basic validation rules
+    if (tokenAmount <= 0) {
+      return {
+        isValid: false,
+        reason: "Token amount must be positive",
+        recommendations: ["Ensure the cashu token has a valid positive amount"]
+      };
+    }
+    
+    if (tokenAmount < 21) {
+      return {
+        isValid: false,
+        reason: "Token amount below minimum threshold",
+        recommendations: ["Minimum game cost is 21 sats"]
+      };
+    }
+    
+    // If we have expected game score, validate it matches
+    if (expectedGameScore !== undefined && expectedGameScore !== tokenAmount) {
+      recommendations.push(`Expected game score (${expectedGameScore}) doesn't match token amount (${tokenAmount})`);
+      return {
+        isValid: false,
+        reason: "Game score mismatch with token amount",
+        playerHistory: playerHistory || undefined,
+        recommendations
+      };
+    }
+    
+    // Check for suspicious patterns
+    if (playerHistory) {
+      const avgGameScore = playerHistory.played > 0 ? playerHistory.score / playerHistory.played : 0;
+      
+      // Flag if this submission is significantly different from player's average
+      if (avgGameScore > 0 && (tokenAmount > avgGameScore * 3 || tokenAmount < avgGameScore * 0.3)) {
+        recommendations.push(`Token amount (${tokenAmount}) is significantly different from player average (${avgGameScore.toFixed(1)})`);
+      }
+      
+      // Flag rapid submissions (this would need timestamp checking)
+      recommendations.push("Consider implementing rate limiting for rapid submissions");
+    }
+    
+    return {
+      isValid: true,
+      reason: "Token amount appears valid",
+      playerHistory: playerHistory || undefined,
+      recommendations
+    };
+    
+  } catch (error) {
+    console.error(`[validate_cashu_amount] Error:`, error);
+    return {
+      isValid: false,
+      reason: `Validation error: ${error instanceof Error ? error.message : 'unknown'}`,
+      recommendations: ["Check system logs for validation errors"]
+    };
+  }
+}
+
+/**
+ * Comprehensive leaderboard integrity check
+ * Validates all players and returns summary of issues
+ */
+export async function performIntegrityCheck(): Promise<{
+  totalPlayers: number;
+  consistentPlayers: number;
+  inconsistentPlayers: number;
+  totalDiscrepancy: number;
+  issues: Array<{
+    npub: string;
+    initials: string;
+    leaderboardTotal: number;
+    calculatedTotal: number;
+    difference: number;
+  }>;
+}> {
+  console.log(`[integrity_check] Performing comprehensive leaderboard integrity check...`);
+  
+  try {
+    const db = getDatabase();
+    
+    // Get all players
+    const playersQuery = db.query(`
+      SELECT npub, initials, total_sats_lost
+      FROM leaderboard_entries
+      ORDER BY total_sats_lost DESC
+    `);
+    const players = playersQuery.all() as { npub: string; initials: string; total_sats_lost: number }[];
+    
+    const issues: Array<{
+      npub: string;
+      initials: string;
+      leaderboardTotal: number;
+      calculatedTotal: number;
+      difference: number;
+    }> = [];
+    
+    let totalDiscrepancy = 0;
+    
+    for (const player of players) {
+      // Calculate actual total from updates
+      const updatesQuery = db.query(`
+        SELECT COALESCE(SUM(sats_lost), 0) as calculated_total
+        FROM leaderboard_updates
+        WHERE npub = ?
+      `);
+      const updateResult = updatesQuery.get(player.npub) as { calculated_total: number };
+      
+      const difference = updateResult.calculated_total - player.total_sats_lost;
+      
+      if (difference !== 0) {
+        issues.push({
+          npub: player.npub,
+          initials: player.initials,
+          leaderboardTotal: player.total_sats_lost,
+          calculatedTotal: updateResult.calculated_total,
+          difference: difference
+        });
+        totalDiscrepancy += Math.abs(difference);
+      }
+    }
+    
+    const result = {
+      totalPlayers: players.length,
+      consistentPlayers: players.length - issues.length,
+      inconsistentPlayers: issues.length,
+      totalDiscrepancy,
+      issues
+    };
+    
+    console.log(`[integrity_check] Complete: ${result.consistentPlayers}/${result.totalPlayers} players consistent, ${result.totalDiscrepancy} total discrepancy`);
+    
+    return result;
+    
+  } catch (error) {
+    console.error(`[integrity_check] Error:`, error);
+    throw new Error(`Failed to perform integrity check: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}

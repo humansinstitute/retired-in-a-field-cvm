@@ -6,7 +6,9 @@
     "start": "bun run server.ts",
     "build": "bun build server.ts --outdir ./dist --target bun",
     "type-check": "bun run tsc --noEmit",
-    "reset": "bun run scripts/reset.ts"
+    "reset": "bun run scripts/reset.ts",
+    "splits-report": "bun run scripts/splits-report.ts",
+    "debug": "bun run scripts/debug-score-discrepancy.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

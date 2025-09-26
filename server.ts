@@ -3,7 +3,15 @@ import { ApplesauceRelayPool, NostrServerTransport } from "@contextvm/sdk";
 import { PrivateKeySigner } from "@contextvm/sdk";
 import { z } from "zod";
 import { processCashuToken } from "./utils/cashu-access.js";
-import { checkLeaderboard, updateLeaderboard, getPlayer } from "./utils/leaderboard.js";
+import {
+  checkLeaderboard,
+  updateLeaderboard,
+  updateLeaderboardWithValidation,
+  getPlayer,
+  getPlayerWithValidation,
+  performIntegrityCheck,
+  validateAndSyncPlayerScore
+} from "./utils/leaderboard.js";
 import { initializeDatabase } from "./utils/database.js";
 
 
@@ -51,45 +59,36 @@ async function main() {
   );
 
     mcpServer.registerTool(
-    "cashu_access",
-    {
-      title: "Cashu Access Tool",
-      description: "Redeem a Cashu token via Cashuwall and check access permissions",
-      inputSchema: {
-        encodedToken: z.string().describe("Cashu token (cashuA...)"),
-        minAmount: z.number().optional().describe("Client hint for min sats (default 21). Server enforces threshold.")
+      "cashu_access",
+      {
+        title: "Cashu Access Tool",
+        description: "Redeem a Cashu token via Cashuwall and return the decision (no side effects)",
+        inputSchema: {
+          encodedToken: z.string().describe("Cashu token (cashuA...)"),
+          minAmount: z.number().optional().describe("Client hint for min sats (default 21). Server enforces threshold.")
+        },
       },
-    },
-    
-    async ({ encodedToken, minAmount }) => {
-      try {
-        console.log(`🪙 Processing Cashu token access request`);
-        
-        const result = await processCashuToken(encodedToken, minAmount);
-        
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }],
-        };
-      } catch (error) {
-        console.error("❌ Cashu access error:", error);
-        
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              decision: 'ACCESS_DENIED',
-              amount: 0,
-              reason: `error: ${error instanceof Error ? error.message : 'unknown'}`,
-              mode: 'error'
-            }, null, 2)
-          }],
-        };
+      async ({ encodedToken, minAmount }) => {
+        try {
+          console.log(`🪙 Processing Cashu token access request (pure redeem, no DB)`);
+          const result = await processCashuToken(encodedToken, minAmount);
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          console.error("❌ Cashu access error:", error);
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                decision: 'ACCESS_DENIED',
+                amount: 0,
+                reason: `error: ${error instanceof Error ? error.message : 'unknown'}`,
+                mode: 'error'
+              }, null, 2)
+            }],
+          };
+        }
       }
-    }
-  );
+    );
 
   mcpServer.registerTool(
     "check_leaderboard",
@@ -131,20 +130,23 @@ async function main() {
     "update_leaderboard",
     {
       title: "Update Leaderboard",
-      description: "Update the leaderboard with new sats lost for a given npub and initials with deduplication",
+      description: "Update the leaderboard with new sats lost for a given npub and initials with validation and deduplication",
       inputSchema: {
         initials: z.string().describe("3-letter initials for the participant"),
         npub: z.string().describe("The npub identifier"),
         satsLost: z.number().describe("Number of sats lost in this submission"),
-        refId: z.string().describe("Unique reference ID to prevent duplicate processing")
+        refId: z.string().describe("Unique reference ID to prevent duplicate processing"),
+        useValidation: z.boolean().optional().describe("Use enhanced validation (default: true)")
       },
     },
     
-    async ({ initials, npub, satsLost, refId }) => {
+    async ({ initials, npub, satsLost, refId, useValidation = true }) => {
       try {
-        console.log(`📝 Processing leaderboard update request (refId: ${refId})`);
+        console.log(`📝 Processing leaderboard update request (refId: ${refId}) with validation: ${useValidation}`);
         
-        const result = await updateLeaderboard(npub, initials, satsLost, refId);
+        const result = useValidation
+          ? await updateLeaderboardWithValidation(npub, initials, satsLost, refId)
+          : await updateLeaderboard(npub, initials, satsLost, refId);
         
         return {
           content: [{
@@ -175,17 +177,20 @@ async function main() {
     "get_player",
     {
       title: "Get Player Details",
-      description: "Get player details by npub including initials, total sats lost (score), and number of games played",
+      description: "Get player details by npub including initials, total sats lost (score), and number of games played with validation",
       inputSchema: {
-        npub: z.string().describe("The npub identifier of the player")
+        npub: z.string().describe("The npub identifier of the player"),
+        useValidation: z.boolean().optional().describe("Use enhanced validation to ensure score consistency (default: true)")
       },
     },
     
-    async ({ npub }) => {
+    async ({ npub, useValidation = true }) => {
       try {
-        console.log(`👤 Processing get player request for npub: ${npub.substring(0, 20)}...`);
+        console.log(`👤 Processing get player request for npub: ${npub.substring(0, 20)}... with validation: ${useValidation}`);
         
-        const result = await getPlayer(npub);
+        const result = useValidation
+          ? await getPlayerWithValidation(npub)
+          : await getPlayer(npub);
         
         if (!result) {
           return {
@@ -214,6 +219,79 @@ async function main() {
             text: JSON.stringify({
               error: `Failed to get player details: ${error instanceof Error ? error.message : 'unknown'}`,
               npub: npub || 'unknown'
+            }, null, 2)
+          }],
+        };
+      }
+    }
+  );
+
+  mcpServer.registerTool(
+    "validate_player_score",
+    {
+      title: "Validate Player Score",
+      description: "Validate and sync a player's score to ensure consistency between leaderboard and update history",
+      inputSchema: {
+        npub: z.string().describe("The npub identifier of the player to validate")
+      },
+    },
+    
+    async ({ npub }) => {
+      try {
+        console.log(`🔍 Processing score validation request for npub: ${npub.substring(0, 20)}...`);
+        
+        const result = await validateAndSyncPlayerScore(npub);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }],
+        };
+      } catch (error) {
+        console.error("❌ Score validation error:", error);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Failed to validate player score: ${error instanceof Error ? error.message : 'unknown'}`,
+              npub: npub || 'unknown'
+            }, null, 2)
+          }],
+        };
+      }
+    }
+  );
+
+  mcpServer.registerTool(
+    "integrity_check",
+    {
+      title: "Leaderboard Integrity Check",
+      description: "Perform a comprehensive integrity check of all player scores",
+      inputSchema: {},
+    },
+    
+    async () => {
+      try {
+        console.log(`🔍 Processing leaderboard integrity check...`);
+        
+        const result = await performIntegrityCheck();
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }],
+        };
+      } catch (error) {
+        console.error("❌ Integrity check error:", error);
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Failed to perform integrity check: ${error instanceof Error ? error.message : 'unknown'}`
             }, null, 2)
           }],
         };

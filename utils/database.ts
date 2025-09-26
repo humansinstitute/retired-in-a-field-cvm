@@ -92,6 +92,54 @@ export function migrateDatabase(): void {
   console.log("[database] Checking for database migrations...");
   
   try {
+    // --- New tables for donations, split accumulators, and payouts ---
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS donations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT UNIQUE NOT NULL,
+        amount_sats INTEGER NOT NULL,
+        redeemed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS split_accumulators (
+        npub TEXT PRIMARY KEY,
+        owed_sats INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        npub TEXT NOT NULL,
+        amount_sats INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        finalized_at DATETIME,
+        external_ref TEXT,
+        error TEXT
+      )
+    `);
+
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_donations_source ON donations(source);`);
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_payouts_npub_status ON payouts(npub, status);`);
+
+    // Dedupe table for cashu_access requests (prevents double redemption attempts)
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS cashu_access_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref_id TEXT UNIQUE NOT NULL,
+        decision TEXT,
+        amount_sats INTEGER,
+        reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME
+      )
+    `);
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cashu_access_ref_id ON cashu_access_requests(ref_id);`);
+
     // Check if ref_id column exists in leaderboard_updates
     const tableInfo = database.query("PRAGMA table_info(leaderboard_updates)").all() as Array<{name: string}>;
     const hasRefId = tableInfo.some(col => col.name === 'ref_id');
