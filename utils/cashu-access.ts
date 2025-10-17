@@ -13,6 +13,7 @@ export interface CashuAccessResult {
   amount: number;
   reason: string;
   mode: string;
+  allLevelsUnlocked?: boolean;
 }
 
 const CASHUWALL_URL = 'http://localhost:3041/cashuwall';
@@ -28,7 +29,8 @@ export async function processCashuToken(
       decision: 'ACCESS_DENIED',
       amount: 0,
       reason: 'encodedToken is required (cashu... string)',
-      mode: 'cashuwall'
+      mode: 'cashuwall',
+      allLevelsUnlocked: false
     };
   }
 
@@ -70,6 +72,7 @@ export async function processCashuToken(
           amount,
           reason: 'accepted',
           mode: 'cashuwall',
+          allLevelsUnlocked: false,
         };
       }
 
@@ -80,6 +83,7 @@ export async function processCashuToken(
         amount,
         reason: data?.reason || data?.error || 'amount_below_threshold',
         mode: 'cashuwall',
+        allLevelsUnlocked: false,
       };
     }
 
@@ -90,6 +94,7 @@ export async function processCashuToken(
       amount: 0,
       reason: String(errorMessage),
       mode: 'cashuwall',
+      allLevelsUnlocked: false,
     };
   } catch (err) {
     clearTimeout(timeout);
@@ -100,6 +105,7 @@ export async function processCashuToken(
       amount: 0,
       reason,
       mode: 'cashuwall',
+      allLevelsUnlocked: false,
     };
   }
 }
@@ -132,6 +138,7 @@ async function processTokenLocally(encodedToken: string, minAmount: number): Pro
       amount: 0,
       reason: "storage_unavailable",
       mode: "local",
+      allLevelsUnlocked: false,
     };
   }
 
@@ -143,6 +150,7 @@ async function processTokenLocally(encodedToken: string, minAmount: number): Pro
       amount: 0,
       reason: "token_already_used",
       mode: "local",
+      allLevelsUnlocked: false,
     };
   } catch {
     // File does not exist yet - proceed
@@ -162,6 +170,7 @@ async function processTokenLocally(encodedToken: string, minAmount: number): Pro
       amount,
       reason: "accepted_local_mode",
       mode: "local",
+      allLevelsUnlocked: true,
     };
   } catch (err) {
     console.error("[cashu_access.local] Failed to write token record:", err);
@@ -170,6 +179,7 @@ async function processTokenLocally(encodedToken: string, minAmount: number): Pro
       amount: 0,
       reason: "storage_write_failed",
       mode: "local",
+      allLevelsUnlocked: false,
     };
   }
 }
